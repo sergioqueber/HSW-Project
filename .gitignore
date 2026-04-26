@@ -13,3 +13,4 @@ sdkconfig
 model.c
 model.h
 test_case.h
+HSW-data

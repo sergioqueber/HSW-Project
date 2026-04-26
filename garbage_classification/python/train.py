@@ -8,7 +8,7 @@ from keras.optimizers import Adam
 from keras.models import load_model
 import tensorflow_model_optimization as tfmot
 
-from preprocess import preprocess_all, NUM_CLASSES, IMAGE_WIDTH, IMAGE_HEIGHT, CHANNELS, IMAGE_MEAN, IMAGE_STD
+from preprocess import preprocess_all, CLASSES, IMAGE_WIDTH, IMAGE_HEIGHT, CHANNELS, IMAGE_MEAN, IMAGE_STD, NUM_CLASSES
 from model import create_model
 
 import sys
@@ -20,7 +20,7 @@ tf.get_logger().setLevel('ERROR')
 
 # Paths and settings
 DATA_DIR = '../data/'
-GEN_DIR = 'gen/'
+GEN_DIR = 'data/'
 MODEL_C_PATH = '../esp32/main/model.c'
 MODEL_H_PATH = '../esp32/main/model.h'
 USE_CACHED_DATA = True  # Set to True to reuse cached preprocessed data, False to force preprocess data

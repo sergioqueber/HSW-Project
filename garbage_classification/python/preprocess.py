@@ -10,6 +10,12 @@ CLASSES = [
     'battery', 'biological', 'cardboard', 'clothes', 'glass', 
     'metal', 'paper', 'plastic', 'shoes', 'trash'
 ]
+NUM_CLASSES = len(CLASSES)
+
+# Since we're dividing by 255.0, the effective range is [0.0, 1.0].
+# For C++ normalization (input - mean) / std:
+IMAGE_MEAN = 0.0
+IMAGE_STD = 255.0
 
 def preprocess_all(data_dir: str, out_dir: str):
     all_x_data = []
