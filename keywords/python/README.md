@@ -66,7 +66,6 @@ Create a virtual environment for the course as follows:
 1. Make sure that your terminal is in the *repository root*`/keywords/python` folder.
 2. Run the training script:
     ```sh
-    python main.py
     ```
 3. Verify that the test accuracy after quantization (printed to the terminal) is at least 94%. If not, run the script again.
 4. Verify that the following C source and header files have been generated:

@@ -1,12 +1,19 @@
 import os
+os.environ['TF_USE_LEGACY_KERAS'] = '1'
+
 import numpy as np
 import tensorflow as tf
 from keras.callbacks import EarlyStopping, ModelCheckpoint
 from keras.optimizers import Adam
-import tensorflow_model_optimization as tfmot # For Quantization Aware Training
+from keras.models import load_model
+import tensorflow_model_optimization as tfmot
 
-from preprocess import preprocess_all 
+from preprocess import preprocess_all, NUM_CLASSES, IMAGE_WIDTH, IMAGE_HEIGHT, CHANNELS, IMAGE_MEAN, IMAGE_STD
 from model import create_model
+
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../keywords/python')))
+from utils.export_tflite import write_model_h_file, write_model_c_file
 
 # Minimize TensorFlow logging
 tf.get_logger().setLevel('ERROR')
@@ -39,6 +46,53 @@ def preprocess_and_load_data() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.n
 
     return x_train, y_train, x_val, y_val, x_test, y_test
 
+
+def export_model_to_tflite(model: tf.keras.models.Model, x_train: np.ndarray):
+    print("Exporting model to TFLite with Full Integer Quantization...")
+    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    
+    def representative_dataset():
+        for i in range(min(100, len(x_train))):
+            yield [x_train[i:i+1].astype(np.float32)]
+            
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+    converter.representative_dataset = representative_dataset
+    
+    # Enforce pure integer operations matching the ESP32 expectations
+    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+    converter.inference_input_type = tf.int8
+    converter.inference_output_type = tf.int8
+    
+    tflite_model = converter.convert()
+    
+    interpreter = tf.lite.Interpreter(model_content=tflite_model)
+    interpreter.allocate_tensors()
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+
+    print('Input scale:', input_details[0]['quantization'][0])
+    print('Input zero point:', input_details[0]['quantization'][1])
+    print('Output scale:', output_details[0]['quantization'][0])
+    print('Output zero point:', output_details[0]['quantization'][1])
+
+    # Export to ESP32 Headers
+    print(f"Exporting C Arrays to {MODEL_C_PATH}...")
+    defines = {
+        'NUM_CLASSES': NUM_CLASSES,
+        'IMAGE_WIDTH': IMAGE_WIDTH,
+        'IMAGE_HEIGHT': IMAGE_HEIGHT,
+        'CHANNELS': CHANNELS,
+        'IMAGE_MEAN': f'{IMAGE_MEAN}f',
+        'IMAGE_STD': f'{IMAGE_STD}f',
+    }
+    
+    os.makedirs(os.path.dirname(MODEL_C_PATH), exist_ok=True)
+    write_model_h_file(MODEL_H_PATH, defines, [])
+    write_model_c_file(MODEL_C_PATH, tflite_model)
+    
+    os.makedirs(GEN_DIR, exist_ok=True)
+    with open(os.path.join(GEN_DIR, 'model.tflite'), 'wb') as f:
+        f.write(tflite_model)
 
 def train():
     x_train, y_train, x_val, y_val, x_test, y_test = preprocess_and_load_data()
@@ -74,18 +128,14 @@ def train():
     )
 
     print("Evaluating on test set...")
+    # Load the best pre-quantization epoch
+    model = load_model('saved_models/best_model.keras')
     test_loss, test_acc = model.evaluate(x_test, y_test)
     print(f"Test Accuracy: {test_acc:.4f}")
 
     # [TO IMPLEMENT] TFLite conversion step
-    # After training, convert to TFLite with integer quantization:
-    # converter = tf.lite.TFLiteConverter.from_keras_model(model)
-    # converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    # # Provide representative dataset generator for full integer quantization
-    # tflite_model = converter.convert()
-    
-    # [TO IMPLEMENT] Write to C array using logic from `utils/export_tflite.py`
-    # write_model_c_file(MODEL_C_PATH, tflite_model)
+    export_model_to_tflite(model, x_train)
+    print("Done. Exported model.c and model.h to ESP32 main folder.")
     
 if __name__ == '__main__':
     train()
