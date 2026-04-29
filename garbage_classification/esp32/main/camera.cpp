@@ -51,8 +51,8 @@ static camera_config_t get_camera_config()
     // Pixel format: RGB565 is efficient to convert to RGB888
     config.pixel_format = PIXFORMAT_RGB565;
 
-    // Resolution: QVGA (320x240)
-    config.frame_size = FRAMESIZE_QVGA;
+    // Resolution: CIF (400x296) so we can crop 256x256
+    config.frame_size = FRAMESIZE_CIF;
 
     // JPEG-specific fields (ignored for RGB565 but set to sane defaults)
     config.jpeg_quality = 12;

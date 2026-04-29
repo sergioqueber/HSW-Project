@@ -18,6 +18,14 @@ from utils.export_tflite import write_model_h_file, write_model_c_file
 # Minimize TensorFlow logging
 tf.get_logger().setLevel('ERROR')
 
+# Enable GPU Memory Growth
+physical_devices = tf.config.list_physical_devices('GPU')
+try:
+    for gpu in physical_devices:
+        tf.config.experimental.set_memory_growth(gpu, True)
+except Exception as e:
+    print(f"Could not initialize memory growth: {e}")
+
 # Paths and settings
 DATA_DIR = '../data/'
 GEN_DIR = 'data/'
@@ -112,25 +120,63 @@ def train():
     # Callbacks for training
     os.makedirs('saved_models', exist_ok=True)
     callbacks = [
-        # [TO IMPLEMENT] Tune EarlyStopping patience
-        EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
+        # Reduce learning rate when validation loss plateaus
+        tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, min_lr=1e-5),
+        EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True),
         ModelCheckpoint('saved_models/best_model.keras', save_best_only=True, monitor='val_accuracy')
     ]
+
+    # Convert Numpy arrays to tf.data.Dataset to prevent GPU OOM copy errors
+    print('Preparing tf.data.Datasets...')
+    batch_size = 32
+    
+    # Force the full dataset tensors to stay on the CPU RAM, 
+    # and only send the 32-image batches to the GPU during training.
+    
+    # Use generator to prevent tf.data.Dataset from copying the entire array into RAM again
+    def gen(x, y):
+        def _gen():
+            for i in range(len(x)):
+                yield x[i], y[i]
+        return _gen
+
+    train_dataset = tf.data.Dataset.from_generator(
+        gen(x_train, y_train),
+        output_signature=(
+            tf.TensorSpec(shape=(IMAGE_WIDTH, IMAGE_HEIGHT, CHANNELS), dtype=tf.float32),
+            tf.TensorSpec(shape=(), dtype=tf.int32)
+        )
+    ).shuffle(1000).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    
+    val_dataset = tf.data.Dataset.from_generator(
+        gen(x_val, y_val),
+        output_signature=(
+            tf.TensorSpec(shape=(IMAGE_WIDTH, IMAGE_HEIGHT, CHANNELS), dtype=tf.float32),
+            tf.TensorSpec(shape=(), dtype=tf.int32)
+        )
+    ).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    
+    test_dataset = tf.data.Dataset.from_generator(
+        gen(x_test, y_test),
+        output_signature=(
+            tf.TensorSpec(shape=(IMAGE_WIDTH, IMAGE_HEIGHT, CHANNELS), dtype=tf.float32),
+            tf.TensorSpec(shape=(), dtype=tf.int32)
+        )
+    ).batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
     # Train model
     print('Training model...')
     history = model.fit(
-        x_train, y_train,
-        validation_data=(x_val, y_val),
+        train_dataset,
+        validation_data=val_dataset,
         epochs=20,
-        batch_size=32,
         callbacks=callbacks
     )
 
     print("Evaluating on test set...")
     # Load the best pre-quantization epoch
     model = load_model('saved_models/best_model.keras')
-    test_loss, test_acc = model.evaluate(x_test, y_test)
+    test_loss, test_acc = model.evaluate(test_dataset)
     print(f"Test Accuracy: {test_acc:.4f}")
 
     # [TO IMPLEMENT] TFLite conversion step

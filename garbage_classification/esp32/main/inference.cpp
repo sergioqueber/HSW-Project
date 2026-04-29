@@ -1,6 +1,8 @@
 #include "inference.h"
 #include "model.h" 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "esp_timer.h" // Added esp_timer.h
 
 // TFLite Micro Headers
 #include "tensorflow/lite/micro/micro_interpreter.h"
@@ -15,14 +17,30 @@ tflite::MicroInterpreter* interpreter = nullptr;
 TfLiteTensor* input = nullptr;
 TfLiteTensor* output = nullptr;
 
+static const char* CLASS_NAMES[] = {
+    "battery", "biological", "cardboard", "clothes", "glass", 
+    "metal", "paper", "plastic", "shoes", "trash"
+};
+
 // Tensor Arena (Memory pool for the model computations)
-// You may need to tune this size down or up depending on your model size!
-constexpr int kTensorArenaSize = 300 * 1024;
-uint8_t tensor_arena[kTensorArenaSize];
+// MobileNetV2 has much larger intermediate feature maps than simple CNNs.
+// A 256x256 image passing through MobileNet will need ~1.5MB - 2MB of working RAM.
+// Since internal SRAM on the ESP32 is only ~520KB, this MUST be allocated in external PSRAM (SPIRAM).
+constexpr int kTensorArenaSize = 2 * 1024 * 1024; 
+uint8_t* tensor_arena = nullptr;
 
 bool inference_init(void)
 {
     ESP_LOGI(TAG, "Initializing TFLite Micro...");
+
+    if (tensor_arena == nullptr) {
+        ESP_LOGI(TAG, "Allocating %d bytes for Tensor Arena in PSRAM...", kTensorArenaSize);
+        tensor_arena = (uint8_t*) heap_caps_malloc(kTensorArenaSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (tensor_arena == nullptr) {
+            ESP_LOGE(TAG, "Failed to allocate tensor arena in PSRAM. Check if PSRAM is enabled in sdkconfig!");
+            return false;
+        }
+    }
 
     // Get the model (model_binary is populated by Python export script)
     tflite_model = tflite::GetModel(model_binary);
@@ -33,15 +51,25 @@ bool inference_init(void)
     }
 
     // Set up the ops resolver
-    // We register the exact operations that our python model (SeparableConv2D, Dense, Softmax) uses.
-    static tflite::MicroMutableOpResolver<7> resolver;
+    // MobileNetV2 uses many complex ops (Add, Mean, Relu6, etc), we map the majority here:
+    static tflite::MicroMutableOpResolver<25> resolver;
     resolver.AddConv2D();
     resolver.AddDepthwiseConv2D();
+    resolver.AddAveragePool2D();
     resolver.AddMaxPool2D();
     resolver.AddReshape();
     resolver.AddFullyConnected();
     resolver.AddSoftmax();
-    resolver.AddPadding(); // Oftentimes injected during SeparableConv2D
+    resolver.AddAdd();
+    resolver.AddMul();
+    resolver.AddSub();
+    resolver.AddMean();
+    resolver.AddPad();
+    resolver.AddRelu();
+    resolver.AddRelu6();
+    resolver.AddQuantize();
+    resolver.AddDequantize();
+    resolver.AddLogistic();
 
     // Build an interpreter to run the model
     static tflite::MicroInterpreter static_interpreter(
@@ -58,7 +86,21 @@ bool inference_init(void)
     // Get information about the memory area to use for the model's input
     input = interpreter->input(0);
     output = interpreter->output(0);
+    
+    ESP_LOGI(TAG, "Input tensor dimensions: %d [%d, %d, %d, %d], type: %d",
+             (int)input->dims->size, 
+             (int)input->dims->data[0], (int)input->dims->data[1], 
+             (int)input->dims->data[2], (int)input->dims->data[3], (int)input->type);
 
+    // Verify input tensor dimensions
+    if (input->dims->size != 4 || 
+        input->dims->data[1] != 256 || input->dims->data[2] != 256 ||
+        input->dims->data[3] != 3) {
+        ESP_LOGE(TAG, "Bad input tensor parameters in model");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Inference engine initialized successfully");
     return true;
 }
 
@@ -67,20 +109,56 @@ int8_t* inference_get_input_tensor(void)
     return input->data.int8;
 }
 
-bool inference_run(float* confidences)
+float inference_get_input_scale(void)
 {
-    // Run the model on the preprocessed input
+    return input->params.scale;
+}
+
+int inference_get_input_zero_point(void)
+{
+    return input->params.zero_point;
+}
+
+bool inference_run(void)
+{
+    if (!interpreter || !input || !output) {
+        ESP_LOGE(TAG, "Interpreter or model input/output is null");
+        return false;
+    }
+
+    // Run the model on this input and make sure it succeeds.
+    long long start_time = esp_timer_get_time();
     if (interpreter->Invoke() != kTfLiteOk) {
         ESP_LOGE(TAG, "Invoke failed.");
         return false;
     }
+    long long end_time = esp_timer_get_time();
+    long long inference_time = (end_time - start_time) / 1000;
+    
+    // Process the output
+    float max_prob = 0;
+    int max_idx = -1;
+    int num_classes = output->dims->data[1];
 
-    // Dequantize outputs back into readable percentage probabilities (0.0 to 1.0 float)
-    for (int i = 0; i < NUM_CLASSES; i++) {
-        int8_t output_val = output->data.int8[i];
-        float probability = (output_val - output->params.zero_point) * output->params.scale;
-        confidences[i] = probability;
+    for (int i = 0; i < num_classes; i++) {
+        // Output might be int8 if quantized, or float
+        float probability;
+        if (output->type == kTfLiteInt8) {
+            int8_t output_val = output->data.int8[i];
+            probability = (output_val - output->params.zero_point) * output->params.scale;
+        } else {
+            probability = output->data.f[i];
+        }
+        
+        if (probability > max_prob) {
+            max_prob = probability;
+            max_idx = i;
+        }
     }
 
+    ESP_LOGI(TAG, "Classification: %s (%.1f%% confidence) | Inference Time: %lldms", 
+             (max_idx >= 0 && max_idx < 10) ? CLASS_NAMES[max_idx] : "Unknown", 
+             max_prob * 100, 
+             inference_time);
     return true;
 }

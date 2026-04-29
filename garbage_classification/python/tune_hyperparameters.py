@@ -2,6 +2,15 @@ import os
 import shutil
 import itertools
 import numpy as np
+import tensorflow as tf
+
+# Enable GPU Memory Growth
+physical_devices = tf.config.list_physical_devices('GPU')
+try:
+    for gpu in physical_devices:
+        tf.config.experimental.set_memory_growth(gpu, True)
+except Exception as e:
+    print(f"Could not initialize memory growth: {e}")
 
 # Ensure TensorFlow handles Keras 3 / 2.16 correctly
 os.environ['TF_USE_LEGACY_KERAS'] = '1'
@@ -61,17 +70,24 @@ def _test_hyperparameters(hyperparameters: dict, x_train: np.ndarray, y_train: n
         EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True),
     ]
     
+    batch_size = hyperparameters['batch_size']
+    with tf.device('/CPU:0'):
+        train_dataset = tf.data.Dataset.from_tensor_slices((x_train, y_train))
+        train_dataset = train_dataset.shuffle(1000).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        
+        val_dataset = tf.data.Dataset.from_tensor_slices((x_val, y_val))
+        val_dataset = val_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
     model.fit(
-        x_train, y_train, 
+        train_dataset,
         epochs=30, 
-        batch_size=hyperparameters['batch_size'], 
-        validation_data=(x_val, y_val), 
+        validation_data=val_dataset, 
         callbacks=callbacks, 
         verbose=0
     )
 
     # Evaluate on validation set
-    val_loss, val_accuracy = model.evaluate(x_val, y_val, verbose=0)
+    val_loss, val_accuracy = model.evaluate(val_dataset, verbose=0)
     return val_accuracy
 
 def tune_hyperparameters_bayesian(x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray, y_val: np.ndarray) -> dict:

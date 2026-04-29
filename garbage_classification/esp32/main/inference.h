@@ -5,6 +5,8 @@
 
 bool inference_init(void);
 int8_t* inference_get_input_tensor(void);
-bool inference_run(float* confidences);
+float inference_get_input_scale(void);
+int inference_get_input_zero_point(void);
+bool inference_run(void);
 
 #endif // INFERENCE_H

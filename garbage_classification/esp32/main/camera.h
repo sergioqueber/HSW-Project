@@ -3,9 +3,9 @@
 
 #include <stdint.h>
 
-// Camera definitions for 320x240 RGB565 buffer from camera.cpp
-#define FRAME_W 320
-#define FRAME_H 240
+// Camera definitions 
+#define FRAME_W 400
+#define FRAME_H 296
 #define FRAME_C 2 // 2 bytes for RGB565 format
 
 bool camera_init(void);
