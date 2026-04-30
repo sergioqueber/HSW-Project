@@ -11,11 +11,11 @@
 
 static const char *TAG = "INFERENCE";
 
-// TFLM Globals
-const tflite::Model* tflite_model = nullptr;
-tflite::MicroInterpreter* interpreter = nullptr;
-TfLiteTensor* input = nullptr;
-TfLiteTensor* output = nullptr;
+// TFLM Globals (static to match repo pattern)
+static const tflite::Model* tflite_model = nullptr;
+static tflite::MicroInterpreter* interpreter = nullptr;
+static TfLiteTensor* input = nullptr;
+static TfLiteTensor* output = nullptr;
 
 static const char* CLASS_NAMES[] = {
     "battery", "biological", "cardboard", "clothes", "glass", 
@@ -26,20 +26,28 @@ static const char* CLASS_NAMES[] = {
 // MobileNetV2 has much larger intermediate feature maps than simple CNNs.
 // A 256x256 image passing through MobileNet will need ~1.5MB - 2MB of working RAM.
 // Since internal SRAM on the ESP32 is only ~520KB, this MUST be allocated in external PSRAM (SPIRAM).
-constexpr int kTensorArenaSize = 2 * 1024 * 1024; 
-uint8_t* tensor_arena = nullptr;
+// TFLite Micro requires 16-byte alignment for the tensor arena to avoid corruption.
+constexpr int kTensorArenaSize = 2 * 1024 * 1024;
+constexpr int kAlignmentBytes = 16;
+static uint8_t* tensor_arena = nullptr;
+static uint8_t* tensor_arena_raw = nullptr;  // Unaligned allocation for cleanup
 
 bool inference_init(void)
 {
     ESP_LOGI(TAG, "Initializing TFLite Micro...");
 
     if (tensor_arena == nullptr) {
-        ESP_LOGI(TAG, "Allocating %d bytes for Tensor Arena in PSRAM...", kTensorArenaSize);
-        tensor_arena = (uint8_t*) heap_caps_malloc(kTensorArenaSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (tensor_arena == nullptr) {
+        ESP_LOGI(TAG, "Allocating %d bytes for Tensor Arena in PSRAM with 16-byte alignment...", kTensorArenaSize);
+        // Allocate extra bytes to ensure we can align to 16-byte boundary
+        tensor_arena_raw = (uint8_t*) heap_caps_malloc(kTensorArenaSize + kAlignmentBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (tensor_arena_raw == nullptr) {
             ESP_LOGE(TAG, "Failed to allocate tensor arena in PSRAM. Check if PSRAM is enabled in sdkconfig!");
             return false;
         }
+        // Align to 16-byte boundary
+        uintptr_t addr = (uintptr_t)tensor_arena_raw;
+        uintptr_t aligned_addr = (addr + (kAlignmentBytes - 1)) & ~(kAlignmentBytes - 1);
+        tensor_arena = (uint8_t*)aligned_addr;
     }
 
     // Get the model (model_binary is populated by Python export script)
