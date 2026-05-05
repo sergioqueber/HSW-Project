@@ -9,6 +9,7 @@
 #define FRAME_C 2 // 2 bytes for RGB565 format
 
 bool camera_init(void);
-bool camera_capture_frame(uint8_t *image_buffer);
+camera_fb_t* camera_capture_frame(void);
+void camera_return_frame(camera_fb_t* fb);
 
 #endif // CAMERA_H

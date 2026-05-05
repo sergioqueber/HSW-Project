@@ -23,22 +23,19 @@ esp_err_t preprocess_image(camera_fb_t *fb, int8_t* out_buffer, float scale, int
 
     uint16_t *img_data = (uint16_t *)fb->buf;
 
-    // Calculate crop offset to center the 240x240 crop from the 320x240 frame
-    int offset_x = (fb->width - kInputWidth) / 2;
-    int offset_y = (fb->height - kInputHeight) / 2;
-
     int out_idx = 0;
     
     // Loop through the cropped region
     for (int y = 0; y < kInputHeight; y++) {
+        int src_y = (y * (fb->height - 1)) / (kInputHeight - 1);
+
         for (int x = 0; x < kInputWidth; x++) {
             // Source index in the full RGB565 frame
-            int src_x = x + offset_x;
-            int src_y = y + offset_y;
+            int src_x = (x * (fb->width - 1)) / (kInputWidth - 1);
+
             int src_idx = src_y * fb->width + src_x;
 
             uint16_t pixel = img_data[src_idx];
-
             // Extract RGB values (0-255 scale) from RGB565 and divide by 255.0
             float r = ((pixel & 0xF800) >> 8) / 255.0f;
             float g = ((pixel & 0x07E0) >> 3) / 255.0f;
@@ -67,6 +64,6 @@ esp_err_t preprocess_image(camera_fb_t *fb, int8_t* out_buffer, float scale, int
         }
     }
 
-    ESP_LOGI(TAG, "Image preprocessed successfully (RGB565 crop -> Quantized Int8)");
+    ESP_LOGI(TAG, "Image preprocessed successfully (RGB565 resize -> Quantized Int8)");
     return ESP_OK;
 }

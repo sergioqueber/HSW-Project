@@ -33,6 +33,42 @@ MODEL_C_PATH = '../esp32/main/model.c'
 MODEL_H_PATH = '../esp32/main/model.h'
 USE_CACHED_DATA = True  # Set to True to reuse cached preprocessed data, False to force preprocess data
 
+def evaluate_tflite_model(tflite_model, x_test, y_test):
+    interpreter = tf.lite.Interpreter(model_content=tflite_model)
+    interpreter.allocate_tensors()
+
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+
+    input_scale, input_zero_point = input_details[0]['quantization']
+    output_scale, output_zero_point = output_details[0]['quantization']
+
+    correct = 0
+
+    for i in range(len(x_test)):
+        x = x_test[i:i+1].astype(np.float32)
+
+        # Quantize float input to int8
+        x_quantized = x / input_scale + input_zero_point
+        x_quantized = np.clip(x_quantized, -128, 127).astype(np.int8)
+
+        interpreter.set_tensor(input_details[0]['index'], x_quantized)
+        interpreter.invoke()
+
+        output = interpreter.get_tensor(output_details[0]['index'])
+
+        # Dequantize output if needed
+        output_float = (output.astype(np.float32) - output_zero_point) * output_scale
+
+        prediction = np.argmax(output_float)
+        label = y_test[i]
+
+        if prediction == label:
+            correct += 1
+
+    acc = correct / len(x_test)
+    print(f"TFLite INT8 Test Accuracy: {acc:.4f}")
+
 def preprocess_and_load_data() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Load data using preprocess.py routines.
@@ -47,15 +83,17 @@ def preprocess_and_load_data() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.n
     # Load preprocessed data
     x_train = np.load(GEN_DIR + 'x_train.npy')
     y_train = np.load(GEN_DIR + 'y_train.npy')
+
+    source_train = np.load(GEN_DIR + 'source_train.npy')
+
     x_val = np.load(GEN_DIR + 'x_val.npy')
     y_val = np.load(GEN_DIR + 'y_val.npy')
     x_test = np.load(GEN_DIR + 'x_test.npy')
     y_test = np.load(GEN_DIR + 'y_test.npy')
 
-    return x_train, y_train, x_val, y_val, x_test, y_test
+    return x_train, y_train, source_train, x_val, y_val, x_test, y_test
 
-
-def export_model_to_tflite(model: tf.keras.models.Model, x_train: np.ndarray):
+def export_model_to_tflite(model, x_train, x_test, y_test):
     print("Exporting model to TFLite with Full Integer Quantization...")
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
     
@@ -103,17 +141,19 @@ def export_model_to_tflite(model: tf.keras.models.Model, x_train: np.ndarray):
         f.write(tflite_model)
 
 def train():
-    x_train, y_train, x_val, y_val, x_test, y_test = preprocess_and_load_data()
-
+    x_train, y_train, source_train, x_val, y_val, x_test, y_test = preprocess_and_load_data()
     # Build and compile model
+    print("Train class counts:", np.bincount(y_train, minlength=NUM_CLASSES))
+    print("Val class counts:", np.bincount(y_val, minlength=NUM_CLASSES))
+    print("Test class counts:", np.bincount(y_test, minlength=NUM_CLASSES))
+
+    print("Train source counts:", np.bincount(source_train, minlength=2))
+    sample_weights = np.ones(len(x_train), dtype=np.float32)
+    sample_weights[source_train == 1] = 2.0
+
     print('Building model...')
     model = create_model()
-    
-    # [TO IMPLEMENT] Post-Training Quantization (PTQ) vs Quantization Aware Training (QAT)
-    # If using QAT, you would wrap the model here:
-    # quantize_model = tfmot.quantization.keras.quantize_model
-    # model = quantize_model(model)
-    
+        
     model.compile(optimizer=Adam(learning_rate=0.001), loss='sparse_categorical_crossentropy', metrics=['accuracy'])
     model.summary()
 
@@ -128,23 +168,26 @@ def train():
 
     # Convert Numpy arrays to tf.data.Dataset to prevent GPU OOM copy errors
     print('Preparing tf.data.Datasets...')
-    batch_size = 32
-    
-    # Force the full dataset tensors to stay on the CPU RAM, 
-    # and only send the 32-image batches to the GPU during training.
-    
+    batch_size = 16  
     # Use generator to prevent tf.data.Dataset from copying the entire array into RAM again
-    def gen(x, y):
+    def gen(x, y, weights=None):
         def _gen():
             for i in range(len(x)):
-                yield x[i], y[i]
+                image = x[i].astype(np.float32)
+                label = np.int32(y[i])
+
+                if weights is None:
+                    yield image, label
+                else:
+                    yield image, label, np.float32(weights[i])
         return _gen
 
     train_dataset = tf.data.Dataset.from_generator(
-        gen(x_train, y_train),
+        gen(x_train, y_train, sample_weights),
         output_signature=(
             tf.TensorSpec(shape=(IMAGE_WIDTH, IMAGE_HEIGHT, CHANNELS), dtype=tf.float32),
-            tf.TensorSpec(shape=(), dtype=tf.int32)
+            tf.TensorSpec(shape=(), dtype=tf.int32),
+            tf.TensorSpec(shape=(), dtype=tf.float32)
         )
     ).shuffle(1000).batch(batch_size).prefetch(tf.data.AUTOTUNE)
     
@@ -179,8 +222,7 @@ def train():
     test_loss, test_acc = model.evaluate(test_dataset)
     print(f"Test Accuracy: {test_acc:.4f}")
 
-    # [TO IMPLEMENT] TFLite conversion step
-    export_model_to_tflite(model, x_train)
+    export_model_to_tflite(model, x_train, x_test, y_test)
     print("Done. Exported model.c and model.h to ESP32 main folder.")
     
 if __name__ == '__main__':

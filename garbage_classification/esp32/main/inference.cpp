@@ -2,7 +2,7 @@
 #include "model.h" 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
-#include "esp_timer.h" // Added esp_timer.h
+#include "esp_timer.h" 
 
 // TFLite Micro Headers
 #include "tensorflow/lite/micro/micro_interpreter.h"
@@ -11,7 +11,7 @@
 
 static const char *TAG = "INFERENCE";
 
-// TFLM Globals (static to match repo pattern)
+// TFLM Globals
 static const tflite::Model* tflite_model = nullptr;
 static tflite::MicroInterpreter* interpreter = nullptr;
 static TfLiteTensor* input = nullptr;
@@ -80,8 +80,7 @@ bool inference_init(void)
     resolver.AddLogistic();
 
     // Build an interpreter to run the model
-    static tflite::MicroInterpreter static_interpreter(
-        tflite_model, resolver, tensor_arena, kTensorArenaSize);
+    static tflite::MicroInterpreter static_interpreter(tflite_model, resolver, tensor_arena, kTensorArenaSize);
     interpreter = &static_interpreter;
 
     // Allocate memory from the tensor_arena for the model's tensors

@@ -41,12 +41,11 @@ static camera_config_t get_camera_config()
     config.pin_reset = -1; // RESET_GPIO_NUM
 
     // Clock
-    config.xclk_freq_hz = 16000000; // 16 MHz
-
+    config.xclk_freq_hz = 10000000;
     // Frame buffer settings
     config.fb_location = CAMERA_FB_IN_PSRAM;
     config.fb_count    = 1;
-    config.grab_mode   = CAMERA_GRAB_LATEST;
+    config.grab_mode   = CAMERA_GRAB_WHEN_EMPTY;
 
     // Pixel format: RGB565 is efficient to convert to RGB888
     config.pixel_format = PIXFORMAT_RGB565;
@@ -85,34 +84,47 @@ bool camera_init(void)
  * @param image_buffer Pointer to the output buffer (must be at least FRAME_W x FRAME_H x FRAME_C bytes).
  * @return true on success, false on failure.
  */
-bool camera_capture_frame(uint8_t *image_buffer)
+camera_fb_t* camera_capture_frame(void)
 {
     // Capture a frame from the camera
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
         ESP_LOGE(TAG, "Failed to get frame buffer.");
-        return false;
+        return nullptr;
     }
+
+    ESP_LOGI(TAG, "Captured frame: %dx%d, len=%d, format=%d",
+             fb->width, fb->height, fb->len, fb->format);
 
     // Verify frame size and format
     if (fb->width != FRAME_W || fb->height != FRAME_H || fb->format != PIXFORMAT_RGB565) {
         ESP_LOGE(TAG, "Unexpected frame format: %dx%d, format %d.", fb->width, fb->height, fb->format);
         esp_camera_fb_return(fb);
-        return false;
+        return nullptr;
     }
 
     // Verify buffer size
     if (fb->len < FRAME_W * FRAME_H * FRAME_C) {
         ESP_LOGE(TAG, "Frame buffer too small: %d bytes, expected at least %d bytes.", fb->len, FRAME_W * FRAME_H * FRAME_C);
         esp_camera_fb_return(fb);
-        return false;
+        return nullptr;
     }
 
-    // Convert the frame buffer to a model input tensor
-    memcpy(image_buffer, fb->buf, FRAME_W * FRAME_H * FRAME_C);
+    size_t expected_min_len = fb->width * fb->height * 2; // RGB565 = 2 bytes/pixel
 
-    // Return the frame buffer to the driver
-    esp_camera_fb_return(fb);
+    if (fb->len < expected_min_len) {
+        ESP_LOGE(TAG, "Frame buffer too small: len=%d, expected at least=%d",
+                 fb->len, expected_min_len);
+        esp_camera_fb_return(fb);
+        return nullptr;
+    }
 
-    return true;
+    return fb;
+}
+
+void camera_return_frame(camera_fb_t* fb)
+{
+    if (fb) {
+        esp_camera_fb_return(fb);
+    }
 }

@@ -18,50 +18,99 @@ IMAGE_MEAN = 0.0
 IMAGE_STD = 255.0
 
 def preprocess_all(data_dir: str, out_dir: str):
-    all_x_data = []
-    all_y_data = []
+    x_train_list, y_train_list, source_train_list = [], [], []
+    x_val_list, y_val_list, source_val_list = [], [], []
+    x_test_list, y_test_list, source_test_list = [], [], []
 
-    for class_index, class_name in enumerate(CLASSES):
-        class_dir = os.path.join(data_dir, class_name)
-        
-        if os.path.exists(class_dir):
+    sources = {
+        'web': 0,
+        'device': 1
+    }
+
+    for source_name, source_id in sources.items():
+        source_dir = os.path.join(data_dir, source_name)
+
+        if not os.path.exists(source_dir):
+            print(f"Warning: Source directory not found -> {source_dir}")
+            continue
+
+        for class_index, class_name in enumerate(CLASSES):
+            class_dir = os.path.join(source_dir, class_name)
+
+            if not os.path.exists(class_dir):
+                print(f"Warning: Directory not found -> {class_dir}")
+                continue
+
             x, y = _preprocess_directory(class_dir, class_index)
-            
-            if len(x) > 0:
-                all_x_data.append(x)
-                all_y_data.append(y)
-        else:
-            print(f"Warning: Directory not found -> {class_dir}")
 
-    x_all = np.concatenate(all_x_data)
-    y_all = np.concatenate(all_y_data)
-    
-    indices = np.arange(len(x_all))
-    np.random.shuffle(indices)
-    x_all = x_all[indices]
-    y_all = y_all[indices]
+            if len(x) == 0:
+                continue
 
-    num_samples = len(x_all)
-    num_train = int(0.6 * num_samples)
-    num_val = int(0.2 * num_samples)
-    
-    x_train = x_all[:num_train]
-    y_train = y_all[:num_train]
-    x_val = x_all[num_train:num_train + num_val]
-    y_val = y_all[num_train:num_train + num_val]
-    x_test = x_all[num_train + num_val:]
-    y_test = y_all[num_train + num_val:]
+            indices = np.arange(len(x))
+            np.random.shuffle(indices)
+
+            num_samples = len(x)
+            num_train = int(0.6 * num_samples)
+            num_val = int(0.2 * num_samples)
+
+            train_idx = indices[:num_train]
+            val_idx = indices[num_train:num_train + num_val]
+            test_idx = indices[num_train + num_val:]
+
+            x_train_list.append(x[train_idx])
+            y_train_list.append(y[train_idx])
+            source_train_list.append(np.full(len(train_idx), source_id, dtype=np.int32))
+
+            x_val_list.append(x[val_idx])
+            y_val_list.append(y[val_idx])
+            source_val_list.append(np.full(len(val_idx), source_id, dtype=np.int32))
+
+            x_test_list.append(x[test_idx])
+            y_test_list.append(y[test_idx])
+            source_test_list.append(np.full(len(test_idx), source_id, dtype=np.int32))
+
+    x_train = np.concatenate(x_train_list)
+    y_train = np.concatenate(y_train_list)
+    source_train = np.concatenate(source_train_list)
+
+    x_val = np.concatenate(x_val_list)
+    y_val = np.concatenate(y_val_list)
+    source_val = np.concatenate(source_val_list)
+
+    x_test = np.concatenate(x_test_list)
+    y_test = np.concatenate(y_test_list)
+    source_test = np.concatenate(source_test_list)
+
+    def shuffle_together(x, y, source):
+        indices = np.arange(len(x))
+        np.random.shuffle(indices)
+        return x[indices], y[indices], source[indices]
+
+    x_train, y_train, source_train = shuffle_together(x_train, y_train, source_train)
+    x_val, y_val, source_val = shuffle_together(x_val, y_val, source_val)
+    x_test, y_test, source_test = shuffle_together(x_test, y_test, source_test)
 
     os.makedirs(out_dir, exist_ok=True)
+
     np.save(os.path.join(out_dir, 'x_train.npy'), x_train)
     np.save(os.path.join(out_dir, 'y_train.npy'), y_train)
+    np.save(os.path.join(out_dir, 'source_train.npy'), source_train)
+
     np.save(os.path.join(out_dir, 'x_val.npy'), x_val)
     np.save(os.path.join(out_dir, 'y_val.npy'), y_val)
+    np.save(os.path.join(out_dir, 'source_val.npy'), source_val)
+
     np.save(os.path.join(out_dir, 'x_test.npy'), x_test)
     np.save(os.path.join(out_dir, 'y_test.npy'), y_test)
+    np.save(os.path.join(out_dir, 'source_test.npy'), source_test)
 
-    del all_x_data, all_y_data, x_all, y_all
     print(f"Preprocessing complete! Files saved to {out_dir}")
+    print("Train class counts:", np.bincount(y_train, minlength=NUM_CLASSES))
+    print("Val class counts:", np.bincount(y_val, minlength=NUM_CLASSES))
+    print("Test class counts:", np.bincount(y_test, minlength=NUM_CLASSES))
+    print("Train source counts:", np.bincount(source_train, minlength=2))
+    print("Val source counts:", np.bincount(source_val, minlength=2))
+    print("Test source counts:", np.bincount(source_test, minlength=2))
 
 
 def _preprocess_directory(data_dir: str, class_index: int) -> tuple[np.ndarray, np.ndarray]:
@@ -102,9 +151,9 @@ def preprocess_image(img_array: np.ndarray) -> np.ndarray:
     img_array = img_array[row_indices, :][:, col_indices]
 
     if img_array.max() > 1.0:
-        img_array = img_array.astype(np.float32) / 255.0
+        img_array = img_array.astype(np.float16) / 255.0
     else:
-        img_array = img_array.astype(np.float32)
+        img_array = img_array.astype(np.float16)
 
     return img_array
 

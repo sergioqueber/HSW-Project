@@ -3,6 +3,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_camera.h"
+#include "driver/usb_serial_jtag.h"
+
+#include <cstring>
 
 #include "camera.h"
 #include "preprocess.h"
@@ -36,12 +39,14 @@ extern "C" void app_main(void)
 
     while (1) {
         // 1. Capture a frame from the camera
-        camera_fb_t *fb = esp_camera_fb_get();
+        camera_fb_t *fb = camera_capture_frame();
         if (!fb) {
             ESP_LOGE(TAG, "Camera capture failed");
-            vTaskDelay(pdMS_TO_TICKS(1000)); // Wait a second before retrying
+            vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
+
+        camera_return_frame(fb);
 
         // 2. Preprocess the image
         ESP_LOGI(TAG, "Preprocessing image...");
