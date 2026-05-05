@@ -1,10 +1,28 @@
 import os
+os.environ['TF_USE_LEGACY_KERAS'] = '1'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+import gc
 import shutil
-import itertools
 import numpy as np
 import tensorflow as tf
+import keras_tuner as kt
 
-# Enable GPU Memory Growth
+from keras.models import Sequential
+from keras.layers import (
+    Input, SeparableConv2D, MaxPooling2D, Dropout, Dense,
+    GlobalAveragePooling2D, BatchNormalization, RandomFlip,
+    RandomRotation, RandomZoom, Rescaling
+)
+from keras.optimizers import Adam
+from keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from keras.applications import MobileNetV2
+
+from train import preprocess_and_load_data
+from preprocess import IMAGE_WIDTH, IMAGE_HEIGHT, CHANNELS, NUM_CLASSES
+
+
+# GPU memory growth
 physical_devices = tf.config.list_physical_devices('GPU')
 try:
     for gpu in physical_devices:
@@ -12,116 +30,185 @@ try:
 except Exception as e:
     print(f"Could not initialize memory growth: {e}")
 
-# Ensure TensorFlow handles Keras 3 / 2.16 correctly
-os.environ['TF_USE_LEGACY_KERAS'] = '1'
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-from keras.models import Sequential
-from keras.layers import Input, Conv2D, SeparableConv2D, MaxPooling2D, Dropout, Flatten, Dense, GlobalAveragePooling2D
-from keras.callbacks import EarlyStopping
-from keras.optimizers import Adam
-from keras_tuner import BayesianOptimization
-from keras_tuner.engine.trial import Trial
+def make_dataset(x, y, batch_size, weights=None, shuffle=False):
+    def gen():
+        for i in range(len(x)):
+            image = x[i].astype(np.float32)
+            label = np.int32(y[i])
 
-from train import preprocess_and_load_data
-from preprocess import IMAGE_WIDTH, IMAGE_HEIGHT, CHANNELS, NUM_CLASSES
+            if weights is None:
+                yield image, label
+            else:
+                yield image, label, np.float32(weights[i])
 
-def _test_hyperparameters(hyperparameters: dict, x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray, y_val: np.ndarray) -> float:
-    # 1. Initial Standard Convolution Layer
-    layers = [
+    if weights is None:
+        output_signature = (
+            tf.TensorSpec(shape=(IMAGE_WIDTH, IMAGE_HEIGHT, CHANNELS), dtype=tf.float32),
+            tf.TensorSpec(shape=(), dtype=tf.int32)
+        )
+    else:
+        output_signature = (
+            tf.TensorSpec(shape=(IMAGE_WIDTH, IMAGE_HEIGHT, CHANNELS), dtype=tf.float32),
+            tf.TensorSpec(shape=(), dtype=tf.int32),
+            tf.TensorSpec(shape=(), dtype=tf.float32)
+        )
+
+    ds = tf.data.Dataset.from_generator(gen, output_signature=output_signature)
+
+    if shuffle:
+        ds = ds.shuffle(1000)
+
+    return ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+
+def build_model(hp):
+    alpha = hp.Choice("mobilenet_alpha", [0.35, 0.5])
+    dense_units = hp.Choice("dense_units", [32, 64, 128])
+    conv_filters = hp.Choice("conv_filters", [32, 64, 96])
+    dropout_rate = hp.Choice("dropout_rate", [0.2, 0.3, 0.4, 0.5])
+    learning_rate = hp.Choice("learning_rate", [1e-3, 5e-4, 1e-4])
+
+    base_model = MobileNetV2(
+        input_shape=(IMAGE_WIDTH, IMAGE_HEIGHT, CHANNELS),
+        alpha=alpha,
+        include_top=False,
+        weights="imagenet"
+    )
+
+    base_model.trainable = False
+
+    model = Sequential([
         Input(shape=(IMAGE_WIDTH, IMAGE_HEIGHT, CHANNELS)),
-        Conv2D(hyperparameters['first_layer_size'], hyperparameters['kernel_size'], padding='same', activation='relu'),
-        MaxPooling2D(2),
-        Dropout(hyperparameters['dropout_rate'])
-    ]
-    
-    # 2. Middle Separable Convolution Layers (Efficient for ESP32)
-    for _ in range(hyperparameters['num_layers']):
-        layers.extend([
-            SeparableConv2D(hyperparameters['layer_size'], hyperparameters['kernel_size'], padding='same', activation='relu'),
-            MaxPooling2D(2),
-            Dropout(hyperparameters['dropout_rate'])
-        ])
-        
-    # 3. Output Global Average Pooling and Dense Layer
-    # GAP prevents massive parameter explosion in the final layer
-    layers.extend([
+
+        RandomFlip("horizontal_and_vertical"),
+        RandomRotation(0.2),
+        RandomZoom(0.2),
+
+        Rescaling(scale=2.0, offset=-1.0),
+
+        base_model,
+
+        SeparableConv2D(conv_filters, kernel_size=3, padding="same", activation="relu"),
+        BatchNormalization(),
+        MaxPooling2D(pool_size=2),
+
         GlobalAveragePooling2D(),
-        Dropout(hyperparameters['dropout_rate']),
-        Dense(NUM_CLASSES, activation='softmax')
+        Dropout(dropout_rate),
+
+        Dense(dense_units, activation="relu"),
+        BatchNormalization(),
+        Dropout(dropout_rate),
+
+        Dense(NUM_CLASSES, activation="softmax")
     ])
 
-    # Safety check: ensure spatial dimensions don't shrink below 1x1 due to pooling
-    num_poolings = 1 + hyperparameters['num_layers']
-    if (IMAGE_WIDTH // (2**num_poolings)) < 1:
-        print('Invalid architecture (too many pooling layers for image size)', end=' ')
-        return 0.0
-
-    # Build and compile model
-    model = Sequential(layers)
     model.compile(
-        optimizer=Adam(learning_rate=hyperparameters['learning_rate']), 
-        loss='sparse_categorical_crossentropy', 
-        metrics=['accuracy']
+        optimizer=Adam(learning_rate=learning_rate),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
     )
 
-    # Train model with early stopping
-    callbacks = [
-        EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True),
-    ]
-    
-    batch_size = hyperparameters['batch_size']
-    with tf.device('/CPU:0'):
-        train_dataset = tf.data.Dataset.from_tensor_slices((x_train, y_train))
-        train_dataset = train_dataset.shuffle(1000).batch(batch_size).prefetch(tf.data.AUTOTUNE)
-        
-        val_dataset = tf.data.Dataset.from_tensor_slices((x_val, y_val))
-        val_dataset = val_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    return model
 
-    model.fit(
-        train_dataset,
-        epochs=30, 
-        validation_data=val_dataset, 
-        callbacks=callbacks, 
-        verbose=0
+
+class GarbageTuner(kt.BayesianOptimization):
+    def run_trial(self, trial, x_train, y_train, source_train, x_val, y_val):
+        tf.keras.backend.clear_session()
+        gc.collect()
+
+        hp = trial.hyperparameters
+
+        batch_size = hp.Choice("batch_size", [8, 16])
+        device_weight = hp.Choice("device_weight", [1.5, 2.0, 3.0, 5.0])
+
+        sample_weights = np.ones(len(x_train), dtype=np.float32)
+        sample_weights[source_train == 1] = device_weight
+
+        train_dataset = make_dataset(
+            x_train,
+            y_train,
+            batch_size=batch_size,
+            weights=sample_weights,
+            shuffle=True
+        )
+
+        val_dataset = make_dataset(
+            x_val,
+            y_val,
+            batch_size=batch_size,
+            weights=None,
+            shuffle=False
+        )
+
+        model = self.hypermodel.build(hp)
+
+        callbacks = [
+            EarlyStopping(
+                monitor="val_accuracy",
+                patience=4,
+                restore_best_weights=True,
+                mode="max"
+            ),
+            ReduceLROnPlateau(
+                monitor="val_loss",
+                factor=0.5,
+                patience=2,
+                min_lr=1e-5
+            )
+        ]
+
+        history = model.fit(
+            train_dataset,
+            validation_data=val_dataset,
+            epochs=15,
+            callbacks=callbacks,
+            verbose=1
+        )
+
+        val_accuracy = max(history.history["val_accuracy"])
+
+        self.oracle.update_trial(
+            trial.trial_id,
+            {"val_accuracy": val_accuracy}
+        )
+
+        tf.keras.backend.clear_session()
+        del model
+        gc.collect()
+
+
+def main():
+    x_train, y_train, source_train, x_val, y_val, x_test, y_test = preprocess_and_load_data()
+
+    print("Train class counts:", np.bincount(y_train, minlength=NUM_CLASSES))
+    print("Val class counts:", np.bincount(y_val, minlength=NUM_CLASSES))
+    print("Train source counts:", np.bincount(source_train, minlength=2))
+
+    tuner_dir = "gen"
+    project_name = "garbage_tuning"
+
+    ## shutil.rmtree(os.path.join(tuner_dir, project_name), ignore_errors=True)
+
+    tuner = GarbageTuner(
+        hypermodel=build_model,
+        objective=kt.Objective("val_accuracy", direction="max"),
+        max_trials=20,
+        directory=tuner_dir,
+        project_name=project_name,
+        overwrite=False
     )
 
-    # Evaluate on validation set
-    val_loss, val_accuracy = model.evaluate(val_dataset, verbose=0)
-    return val_accuracy
+    tuner.search(x_train, y_train, source_train, x_val, y_val)
 
-def tune_hyperparameters_bayesian(x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray, y_val: np.ndarray) -> dict:
-    class MyTuner(BayesianOptimization):
-        def run_trial(self, trial: Trial, x_train, y_train, x_val, y_val):
-            hp = trial.hyperparameters
-            hyperparameters = {
-                'learning_rate': hp.Choice('learning_rate', [0.001, 0.0005, 0.0001]),
-                'batch_size': hp.Choice('batch_size', [16, 32]), # Keeping low (16 or 32) since 256x256 image arrays consume more RAM
-                'dropout_rate': hp.Choice('dropout_rate', [0.1, 0.2, 0.3]),
-                'num_layers': hp.Choice('num_layers', [2, 3, 4]),
-                'layer_size': hp.Choice('layer_size', [16, 32, 64]),
-                'first_layer_size': hp.Choice('first_layer_size', [16, 32]),
-                'kernel_size': hp.Choice('kernel_size', [3, 5])
-            }
-            return _test_hyperparameters(hyperparameters, x_train, y_train, x_val, y_val)
+    best_hp = tuner.get_best_hyperparameters(1)[0]
 
-    # Run tuning
-    tuner = MyTuner(objective='val_accuracy', max_trials=20, directory='gen', project_name='garbage_tuning')
-    tuner.search(x_train, y_train, x_val, y_val)
+    print("\n======================================")
+    print("Best hyperparameters found:")
+    for key, value in best_hp.values.items():
+        print(f"{key}: {value}")
+    print("======================================")
 
-    # Delete 'gen/garbage_tuning' directory to allow clean re-runs
-    shutil.rmtree("gen/garbage_tuning", ignore_errors=True)
 
-    return tuner.get_best_hyperparameters(1)[0].values
-
-if __name__ == '__main__':
-    # Load data from the npy files
-    x_train, y_train, x_val, y_val, x_test, y_test = preprocess_and_load_data()
-
-    print("Starting Bayesian Optimization Hyperparameter Tuning...")
-    best_hyperparameters = tune_hyperparameters_bayesian(x_train, y_train, x_val, y_val)
-
-    print('\n======================================')
-    print('Best hyperparameters found:')
-    print(best_hyperparameters)
-    print('======================================')
+if __name__ == "__main__":
+    main()
