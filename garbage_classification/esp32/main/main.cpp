@@ -46,8 +46,6 @@ extern "C" void app_main(void)
             continue;
         }
 
-        camera_return_frame(fb);
-
         // 2. Preprocess the image
         ESP_LOGI(TAG, "Preprocessing image...");
         if (preprocess_image(fb, model_input_tensor, input_scale, input_zero_point) != ESP_OK) {
