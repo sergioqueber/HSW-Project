@@ -14,7 +14,7 @@ def create_model() -> tf.keras.Model:
     # This massively reduces parameters to ensure the INT8 Quantized model is < 500KB!
     base_model = MobileNetV2(
         input_shape=(IMAGE_WIDTH, IMAGE_HEIGHT, CHANNELS),
-        alpha=0.35,
+        alpha=0.5,
         include_top=False,
         weights='imagenet'
     )
@@ -39,18 +39,18 @@ def create_model() -> tf.keras.Model:
         # 2. Microcontroller-friendly Separable Conv
         # We replace the massive Conv2D(512) with a tiny SeparableConv2D(64).
         # Normal Conv2D multiplies everything heavily; Separable splits spatial and depth, saving 90% parameters.
-        SeparableConv2D(64, kernel_size=3, padding='same', activation='relu'),
+        SeparableConv2D(32, kernel_size=3, padding='same', activation='relu'),
         BatchNormalization(),
         MaxPooling2D(pool_size=2),
         
         # 3. Global Feature Extraction & Classification Head
         GlobalAveragePooling2D(),
-        Dropout(0.4),
+        Dropout(0.2),
         
         # Small Dense brain (64 neurons instead of 256/512)
-        Dense(64, activation='relu'),
+        Dense(32, activation='relu'),
         BatchNormalization(),
-        Dropout(0.4),
+        Dropout(0.2),
         
         Dense(NUM_CLASSES, activation='softmax') 
     ])

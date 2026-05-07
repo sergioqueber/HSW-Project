@@ -41,11 +41,11 @@ static camera_config_t get_camera_config()
     config.pin_reset = -1; // RESET_GPIO_NUM
 
     // Clock
-    config.xclk_freq_hz = 10000000;
+    config.xclk_freq_hz = 20000000;
     // Frame buffer settings
     config.fb_location = CAMERA_FB_IN_PSRAM;
-    config.fb_count    = 1;
-    config.grab_mode   = CAMERA_GRAB_WHEN_EMPTY;
+    config.fb_count    = 2;
+    config.grab_mode   = CAMERA_GRAB_LATEST;
 
     // Pixel format: RGB565 is efficient to convert to RGB888
     config.pixel_format = PIXFORMAT_RGB565;
@@ -76,6 +76,32 @@ bool camera_init(void)
 
     ESP_LOGI(TAG, "Camera initialized: %dx%d RGB565.", FRAME_W, FRAME_H);
 
+    ESP_LOGI(TAG, "Waiting for AE/AWB to stabilise...");
+    for (int i = 0; i < 10; i++) {
+        camera_fb_t *warmup = esp_camera_fb_get();
+        if (warmup) {
+            esp_camera_fb_return(warmup);
+        }
+    }
+
+    // By default the sensor does NOT apply gamma correction when outputting RGB565,
+    // producing near-linear-light values. Training images are sRGB JPEG files
+    // (gamma-corrected), so without this the model sees a systematically different
+    // colour distribution from what it was trained on.
+    sensor_t *sensor = esp_camera_sensor_get();
+    if (sensor) {
+        sensor->set_raw_gma(sensor, 1); 
+        sensor->set_lenc(sensor, 1);     
+        sensor->set_gainceiling(sensor, (gainceiling_t)1); 
+        sensor->set_awb_gain(sensor, 1); 
+        sensor->set_exposure_ctrl(sensor, 1);
+        sensor->set_aec2(sensor, 1);   
+    } else {
+        ESP_LOGW(TAG, "Could not get sensor handle for ISP configuration");
+    }
+
+    ESP_LOGI(TAG, "Camera ready.");
+    
     return true;
 }
 
