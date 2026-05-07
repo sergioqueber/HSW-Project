@@ -15,7 +15,7 @@ from preprocess import preprocess_all, CLASSES, IMAGE_WIDTH, IMAGE_HEIGHT, CHANN
 from model import create_model
 
 import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../keywords/python')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../garbage/python')))
 from utils.export_tflite import write_model_h_file, write_model_c_file
 
 # Minimize TensorFlow logging
