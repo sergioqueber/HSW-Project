@@ -3,6 +3,9 @@ os.environ['TF_USE_LEGACY_KERAS'] = '1'
 
 import numpy as np
 import tensorflow as tf
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, classification_report
 from keras.callbacks import EarlyStopping, ModelCheckpoint
 from keras.optimizers import Adam
 from keras.models import load_model
@@ -12,7 +15,7 @@ from preprocess import preprocess_all, CLASSES, IMAGE_WIDTH, IMAGE_HEIGHT, CHANN
 from model import create_model
 
 import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../keywords/python')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../garbage_classification/python')))
 from utils.export_tflite import write_model_h_file, write_model_c_file
 
 # Minimize TensorFlow logging
@@ -32,6 +35,108 @@ GEN_DIR = 'data/'
 MODEL_C_PATH = '../esp32/main/model.c'
 MODEL_H_PATH = '../esp32/main/model.h'
 USE_CACHED_DATA = True  # Set to True to reuse cached preprocessed data, False to force preprocess data
+
+def generate_visualizations(history, model, x_test, y_test):
+    print("\nGenerating standard model visualizations...")
+    os.makedirs('visualizations', exist_ok=True)
+
+    # 1. Plot Training vs Validation Accuracy
+    plt.figure(figsize=(10, 5))
+    plt.plot(history.history['accuracy'], label='Train Accuracy')
+    plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+    plt.title('Model Accuracy')
+    plt.ylabel('Accuracy')
+    plt.xlabel('Epoch')
+    plt.legend(loc='lower right')
+    plt.grid(True)
+    plt.savefig('visualizations/accuracy_plot.png')
+    plt.close()
+
+    # 2. Plot Training vs Validation Loss
+    plt.figure(figsize=(10, 5))
+    plt.plot(history.history['loss'], label='Train Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.title('Model Loss')
+    plt.ylabel('Loss')
+    plt.xlabel('Epoch')
+    plt.legend(loc='upper right')
+    plt.grid(True)
+    plt.savefig('visualizations/loss_plot.png')
+    plt.close()
+
+    # 3. Generate Predictions for Confusion Matrix
+    print("Generating predictions on test set...")
+    y_pred_probs = model.predict(x_test, batch_size=16)
+    y_pred = np.argmax(y_pred_probs, axis=1)
+
+    # 4. Plot Confusion Matrix
+    cm = confusion_matrix(y_test, y_pred)
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(cm, annot=True, fmt='d', xticklabels=CLASSES, yticklabels=CLASSES, cmap='Blues')
+    plt.xlabel('Predicted Label')
+    plt.ylabel('Actual Label')
+    plt.title('Classification Confusion Matrix (Standard Model)')
+    plt.tight_layout()
+    plt.savefig('visualizations/confusion_matrix_standard.png')
+    plt.close()
+
+    # 5. Save Classification Report (Table)
+    report = classification_report(y_test, y_pred, target_names=CLASSES)
+    with open('visualizations/classification_report_standard.txt', 'w') as f:
+        f.write(report)
+        
+    print("Standard visualizations saved successfully.")
+
+def generate_tflite_visualizations(tflite_model, x_test, y_test):
+    print("\nGenerating TFLite visualizations (this takes a moment due to inference on CPU)...")
+    
+    interpreter = tf.lite.Interpreter(model_content=tflite_model)
+    interpreter.allocate_tensors()
+
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+
+    input_scale, input_zero_point = input_details[0]['quantization']
+    output_scale, output_zero_point = output_details[0]['quantization']
+
+    y_pred_tflite = []
+
+    for i in range(len(x_test)):
+        x = x_test[i:i+1].astype(np.float32)
+
+        # Quantize float input to int8
+        x_quantized = x / input_scale + input_zero_point
+        x_quantized = np.clip(x_quantized, -128, 127).astype(np.int8)
+
+        interpreter.set_tensor(input_details[0]['index'], x_quantized)
+        interpreter.invoke()
+
+        output = interpreter.get_tensor(output_details[0]['index'])
+
+        # Dequantize output
+        output_float = (output.astype(np.float32) - output_zero_point) * output_scale
+        prediction = np.argmax(output_float)
+        y_pred_tflite.append(prediction)
+
+    y_pred_tflite = np.array(y_pred_tflite)
+
+    # Plot TFLite Confusion Matrix
+    cm = confusion_matrix(y_test, y_pred_tflite)
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(cm, annot=True, fmt='d', xticklabels=CLASSES, yticklabels=CLASSES, cmap='Oranges')
+    plt.xlabel('Predicted Label (TFLite)')
+    plt.ylabel('Actual Label')
+    plt.title('Classification Confusion Matrix (TFLite INT8)')
+    plt.tight_layout()
+    plt.savefig('visualizations/confusion_matrix_tflite.png')
+    plt.close()
+
+    # Save TFLite Classification Report (Table)
+    report = classification_report(y_test, y_pred_tflite, target_names=CLASSES)
+    with open('visualizations/classification_report_tflite.txt', 'w') as f:
+        f.write(report)
+        
+    print("TFLite visualizations saved successfully.")
 
 def evaluate_tflite_model(tflite_model, x_test, y_test):
     interpreter = tf.lite.Interpreter(model_content=tflite_model)
@@ -110,6 +215,9 @@ def export_model_to_tflite(model, x_train, x_test, y_test):
     converter.inference_output_type = tf.int8
     
     tflite_model = converter.convert()
+    
+    # Generate the TFLite visualizations right after conversion
+    generate_tflite_visualizations(tflite_model, x_test, y_test)
     
     interpreter = tf.lite.Interpreter(model_content=tflite_model)
     interpreter.allocate_tensors()
@@ -221,6 +329,9 @@ def train():
     model = load_model('saved_models/best_model.keras')
     test_loss, test_acc = model.evaluate(test_dataset)
     print(f"Test Accuracy: {test_acc:.4f}")
+
+    # Generate the standard model visualizations here
+    generate_visualizations(history, model, x_test, y_test)
 
     export_model_to_tflite(model, x_train, x_test, y_test)
     print("Done. Exported model.c and model.h to ESP32 main folder.")
