@@ -4,7 +4,7 @@ os.environ['TF_USE_LEGACY_KERAS'] = '1'
 import numpy as np
 import tensorflow as tf
 import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../keywords/python')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../garbege_classification/python')))
 from utils.export_tflite import write_model_h_file, write_model_c_file
 
 BASE_DIR = os.path.dirname(__file__)
