@@ -8,3 +8,4 @@ tf-keras
 tensorflow-model-optimization
 pygame>=2.5.0
 pyserial>=3.5
+seaborn
